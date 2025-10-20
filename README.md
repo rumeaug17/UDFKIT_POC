@@ -225,4 +225,3 @@ pytest -q
 
 **Projet :** POC Excel ↔ Python — UDFKit sécurisé  
 **Version :** 2.2  
-**Mainteneur :** Équipe Actuariat & Architecture Technique (Groupe AGRICA)
