@@ -56,7 +56,10 @@ python -m venv .venv
 # 2. Installer les dépendances
 pip install -r requirements.txt
 
-# 3. Lancer le serveur
+# 3. Créer et configurer le fichier .env en spécifant  l'API Key à utiliser
+API_KEY=secret123
+
+# 4. Lancer le serveur
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
