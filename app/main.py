@@ -1,7 +1,17 @@
+import logging
+import sys
+
 from fastapi import FastAPI
 from app.udfkit import attach_to_app
 from app.security import verify_api_key
 import app.my_udfs  # import des fonctions métiers
+
+# Format lisible et horodaté
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    stream=sys.stdout,
+)
 
 app = FastAPI(title="Excel Python Local Server (UDFKit)")
 

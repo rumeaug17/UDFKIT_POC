@@ -8,7 +8,46 @@ from fastapi import APIRouter, Depends, HTTPException, Body
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import os
+import logging, time
+from typing import Any
 
+logger = logging.getLogger("udfkit")
+def _summarize_val(v: Any) -> Any:
+    """Résumé compact et sûr pour les logs (évite d'inonder/PII).
+    - list/tuple: taille + 1ers éléments
+    - dict: clés + tailles
+    - pydantic model: dict() résumé
+    """
+    try:
+        from pydantic import BaseModel
+    except Exception:
+        BaseModel = tuple()  # type: ignore
+
+    try:
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            return v
+        if isinstance(v, (list, tuple)):
+            n = len(v)
+            head = v[:5] if n else []
+            return {"type": type(v).__name__, "len": n, "head": head}
+        if isinstance(v, dict):
+            return {"type": "dict", "keys": list(v.keys())[:10]}
+        if "numpy" in type(v).__module__.lower():
+            # numpy array
+            try:
+                import numpy as np  # noqa
+                shape = getattr(v, "shape", None)
+                return {"type": "ndarray", "shape": shape}
+            except Exception:
+                return {"type": "ndarray"}
+        if BaseModel and isinstance(v, BaseModel):  # type: ignore[truthy-bool]
+            d = v.model_dump()
+            return {k: _summarize_val(d[k]) for k in d}
+        # fallback
+        return {"type": type(v).__name__}
+    except Exception:
+        return {"type": type(v).__name__}
+    
 # =========================================================
 # Types & schémas communs
 # =========================================================
@@ -98,12 +137,27 @@ def _set_job(job_id: str, **updates):
         _JOBS[job_id].update(updates)
 
 def _run_job(job_id: str, meta: _UDFMeta, req_obj: BaseModel):
+    t0 = time.perf_counter()
     try:
         _set_job(job_id, status=JobStatus.running)
-        result = meta.func(req_obj)  # calcul métier
+        logger.info(
+            "udf.async.start",
+            extra={"udf": meta.name, "job_id": job_id},
+        )
+        result = meta.func(req_obj)
         _set_job(job_id, status=JobStatus.done, result=result, error=None)
+        dt = time.perf_counter() - t0
+        logger.info(
+            "udf.async.done",
+            extra={"udf": meta.name, "job_id": job_id, "elapsed_s": round(dt, 4)},
+        )
     except Exception as e:
         _set_job(job_id, status=JobStatus.error, error=str(e))
+        dt = time.perf_counter() - t0
+        logger.exception(
+            "udf.async.error",
+            extra={"udf": meta.name, "job_id": job_id, "elapsed_s": round(dt, 4)},
+        )
 
 # =========================================================
 # Montage des routes sur une app FastAPI
@@ -155,9 +209,28 @@ def attach_to_app(
             pass
 
         async def endpoint(req: Any = Body(...)):
-            # Validation explicite pour éviter tout ForwardRef
-            obj = ReqModel.model_validate(req)
-            return meta.func(obj)
+            t0 = time.perf_counter()
+            try:
+                # Validation explicite pour éviter tout ForwardRef
+                obj = ReqModel.model_validate(req)
+                logger.info(
+                    "udf.sync.start",
+                    extra={"udf": meta.name, "mode": meta.mode, "request": _summarize_val(obj)},
+                )
+                res = meta.func(obj)
+                dt = time.perf_counter() - t0
+                logger.info(
+                    "udf.sync.done",
+                    extra={"udf": meta.name, "elapsed_s": round(dt, 4)},
+                )
+                return res
+            except Exception:
+                dt = time.perf_counter() - t0
+                logger.exception(
+                    "udf.sync.error",
+                    extra={"udf": meta.name, "elapsed_s": round(dt, 4)},
+                )
+                raise
 
         # ⚠️ Remplace l’annotation string par la vraie classe
         endpoint.__annotations__ = {'req': ReqModel}
@@ -180,7 +253,11 @@ def attach_to_app(
                     "error": None,
                     "udf_name": meta.name,
                 }
-            _EXECUTOR.submit(_run_job, job_id, meta, obj)  # type: ignore[name-defined]
+            logger.info(
+                "udf.async.submit",
+                extra={"udf": meta.name, "job_id": job_id, "request": _summarize_val(obj)},
+            )
+            _EXECUTOR.submit(_run_job, job_id, meta, obj)
             return JobSubmitResponse(job_id=job_id, status=JobStatus.queued)
 
         endpoint.__annotations__ = {'req': ReqModel}
